@@ -20,6 +20,25 @@ var overlays: [NSWindow] = []
 var statusItem: NSStatusItem?
 var micActive = false
 var cameraActive = false
+var newVersion: String?
+var lastUpdateCheck = Date.distantPast
+let downloadURL = URL(string: "https://github.com/legolas-stz/stehauf/releases/latest/download/Stehauf.zip")!
+
+// Fragt höchstens einmal am Tag bei GitHub, ob es eine neuere Version gibt
+func checkForUpdate() {
+    guard Date().timeIntervalSince(lastUpdateCheck) > 24 * 3600 else { return }
+    lastUpdateCheck = Date()
+    struct Release: Decodable { let tag_name: String }
+    let api = URL(string: "https://api.github.com/repos/legolas-stz/stehauf/releases/latest")!
+    URLSession.shared.dataTask(with: api) { data, _, _ in
+        guard let data, let release = try? JSONDecoder().decode(Release.self, from: data) else { return }
+        let latest = release.tag_name.hasPrefix("v") ? String(release.tag_name.dropFirst()) : release.tag_name
+        let current = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        DispatchQueue.main.async {
+            newVersion = latest.compare(current, options: .numeric) == .orderedDescending ? latest : nil
+        }
+    }.resume()
+}
 
 func screenLocked() -> Bool {
     let dict = CGSessionCopyCurrentDictionary() as? [String: Any]
@@ -327,13 +346,24 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func statusMenu() -> NSMenu {
         let menu = NSMenu()
         menu.addItem(withTitle: "", action: nil, keyEquivalent: "").view = statusRow
+        addUpdateItem(to: menu)
         return menu
+    }
+
+    private func addUpdateItem(to menu: NSMenu) {
+        guard let newVersion else { return }
+        addItem(to: menu, tr("Update auf \(newVersion) laden …", "Download Update \(newVersion)…"), #selector(downloadUpdate))
+    }
+
+    @objc private func downloadUpdate() {
+        NSWorkspace.shared.open(downloadURL)
     }
 
     private func settingsMenu() -> NSMenu {
         let menu = NSMenu()
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
         menu.addItem(withTitle: "Stehauf \(version)", action: nil, keyEquivalent: "")
+        addUpdateItem(to: menu)
         menu.addItem(.separator())
         addItem(to: menu, tr("Beim Anmelden starten", "Open at Login"), #selector(toggleLogin)).state = SMAppService.mainApp.status == .enabled ? .on : .off
         addItem(to: menu, tr("Auch in Meetings erinnern", "Remind During Meetings"), #selector(toggleMeetings)).state = remindInMeetings ? .on : .off
@@ -432,9 +462,9 @@ if testing {
     readDevices()
     refreshStatus()
     // .common, damit der Timer auch bei geöffnetem Menü weiterläuft
-    let timer = Timer(timeInterval: 60, repeats: true) { _ in readDevices(); check(); refreshStatus() }
+    let timer = Timer(timeInterval: 60, repeats: true) { _ in readDevices(); check(); refreshStatus(); checkForUpdate() }
     timer.tolerance = 15
     RunLoop.main.add(timer, forMode: .common)
-    DispatchQueue.main.async { welcomeOnFirstLaunch() }
+    DispatchQueue.main.async { welcomeOnFirstLaunch(); checkForUpdate() }
 }
 app.run()

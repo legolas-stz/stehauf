@@ -1,7 +1,7 @@
 <p align="center"><a href="README.md">English</a> · <strong>Deutsch</strong></p>
 
 <p align="center">
-  <img src="assets/demo.de.gif" width="800" alt="Im Zeitraffer: Der Balken in der Menüleiste zählt von 55 Minuten herunter, dann füllt „Steh auf.“ den ganzen Bildschirm. Ein Klick auf „Erledigt“ startet die Zeit neu.">
+  <img src="assets/demo.de.gif" width="800" alt="Im Zeitraffer: Der Balken in der Menüleiste zählt von 55 Minuten herunter. Ein Meeting beginnt, das Menü zeigt „Pausiert, Mikrofon aktiv“. Nach dem Meeting füllt „Steh auf.“ den ganzen Bildschirm. Ein Klick auf „Erledigt“ startet die Zeit neu.">
 </p>
 
 <h1 align="center">Stehauf</h1>
@@ -33,7 +33,7 @@
 - **Nicht zu übersehen:** Der Hinweis füllt alle Monitore, statt als Mitteilung unterzugehen.
 - **Stört keine Meetings:** Solange Mikrofon oder Kamera laufen, wartet die Erinnerung.
 - **Zählt nur echte Zeit am Mac:** 5 Minuten Sperren, Ruhezustand oder schlafendes Display setzen die Zeit zurück.
-- **Privat:** Kostenlos, ohne Konto, ohne Berechtigungen, ohne gesendete Daten.
+- **Privat:** Kostenlos, ohne Konto, ohne Berechtigungen. Stehauf fragt nur einmal am Tag bei GitHub nach einer neuen Version.
 
 ## Installieren
 
@@ -83,7 +83,7 @@ Ein Klick auf die kleine Figur oben rechts in der Menüleiste zeigt die verbleib
 
 ## Aktualisieren und entfernen
 
-**Aktualisieren:** Lade Stehauf wie oben neu herunter, öffne es und klicke auf **Installieren**, oder führe den Terminal-Befehl noch einmal aus. Deine Einstellungen bleiben erhalten. Stehauf meldet neue Versionen nicht von selbst, du findest sie unter [Releases](https://github.com/legolas-stz/stehauf/releases).
+**Aktualisieren:** Lade Stehauf wie oben neu herunter, öffne es und klicke auf **Installieren**, oder führe den Terminal-Befehl noch einmal aus. Deine Einstellungen bleiben erhalten. Gibt es eine neue Version, erscheint im Menü von Stehauf **Update laden**. Alle Versionen findest du unter [Releases](https://github.com/legolas-stz/stehauf/releases).
 
 **Entfernen:** Klicke mit rechts auf die Figur, wähle **Stehauf beenden** und ziehe Stehauf aus dem Programme-Ordner in den Papierkorb. Steht es danach noch unter **Systemeinstellungen → Allgemein → Anmeldeobjekte**, kannst du den Eintrag dort löschen.
 
@@ -129,6 +129,7 @@ cd stehauf
 | `./test.sh` | Baut und zeigt den Hinweis sofort, mit `./test.sh en` auf Englisch |
 | `./uninstall.sh` | Entfernt die App und ihre Einstellungen |
 | `./release.sh 1.0` | Veröffentlicht `Stehauf.zip` als GitHub-Release |
+| `swift assets/demo.swift` | Zeichnet die Demo-GIFs und das Vorschaubild für Links neu |
 
 GitHub Actions baut jeden Push auf `main` und jeden Pull Request. Ein Tag wie `v1.1` wird dort ebenfalls gebaut und als Release mit `Stehauf.zip` veröffentlicht über `release.sh`, notarisiert, sobald die Secrets unten eingetragen sind.
 

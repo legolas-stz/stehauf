@@ -1,7 +1,7 @@
 <p align="center"><strong>English</strong> · <a href="README.de.md">Deutsch</a></p>
 
 <p align="center">
-  <img src="assets/demo.gif" width="800" alt="Time-lapse: the bar in the menu bar counts down from 55 minutes, then a big “Stand up.” fills the whole screen. Clicking “Done” restarts the timer.">
+  <img src="assets/demo.gif" width="800" alt="Time-lapse: the bar in the menu bar counts down from 55 minutes. A meeting starts and the menu shows “Paused, microphone in use”. When the meeting ends, a big “Stand up.” fills the whole screen. Clicking “Done” restarts the timer.">
 </p>
 
 <h1 align="center">Stehauf</h1>
@@ -33,7 +33,7 @@
 - **Impossible to miss:** The reminder fills every display instead of getting lost as a notification.
 - **Doesn't interrupt meetings:** While your microphone or camera is on, the reminder waits.
 - **Only counts real time at your Mac:** 5 minutes of locking, sleep or a sleeping display reset the timer.
-- **Private:** Free, no account, no permissions, no data sent anywhere.
+- **Private:** Free, no account, no permissions. The only thing Stehauf sends is a daily check with GitHub for a new version.
 
 *Stehauf* is German for “stand up”.
 
@@ -85,7 +85,7 @@ Click the small figure at the top right of the menu bar to see the time left; ri
 
 ## Update and remove
 
-**Update:** Download Stehauf again as above, open it and click **Install**, or run the Terminal command again. Your settings are kept. Stehauf doesn't announce new versions itself; you'll find them under [Releases](https://github.com/legolas-stz/stehauf/releases).
+**Update:** Download Stehauf again as above, open it and click **Install**, or run the Terminal command again. Your settings are kept. When a new version is out, **Download Update** appears in Stehauf's menu. All versions are listed under [Releases](https://github.com/legolas-stz/stehauf/releases).
 
 **Remove:** Right-click the figure, choose **Quit Stehauf**, and drag Stehauf from the Applications folder to the Trash. If it's still listed under **System Settings → General → Login Items** afterwards, you can delete the entry there.
 
@@ -131,6 +131,7 @@ cd stehauf
 | `./test.sh` | Builds and shows the reminder right away, in German with `./test.sh de` |
 | `./uninstall.sh` | Removes the app and its settings |
 | `./release.sh 1.0` | Publishes `Stehauf.zip` as a GitHub release |
+| `swift assets/demo.swift` | Renders the demo GIFs and the social preview image |
 
 Every push to `main` and every pull request is built on GitHub Actions. Pushing a tag like `v1.1` builds there too and publishes `Stehauf.zip` as a release via `release.sh`, notarized once the secrets below are set.
 

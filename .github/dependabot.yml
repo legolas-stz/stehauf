@@ -1,0 +1,7 @@
+# Hält die festgenagelten Action-Versionen aktuell
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

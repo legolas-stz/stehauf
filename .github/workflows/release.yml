@@ -1,0 +1,53 @@
+# Baut Stehauf und veröffentlicht Stehauf.zip als Release: git tag v1.1 && git push origin v1.1
+# Sind die Apple-Secrets eingetragen (siehe README, „Für Entwickler“), wird signiert und notarisiert,
+# sonst ad-hoc signiert.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      NOTARIZE: ${{ secrets.DEVELOPER_ID_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Signieren und Notarisieren vorbereiten
+        if: env.NOTARIZE == 'true'
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN"
+
+          echo "$DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -k "$KEYCHAIN" -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          rm "$RUNNER_TEMP/developer-id.p12"
+
+          xcrun notarytool store-credentials stehauf \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+
+          SIGN_ID=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+          [ -n "$SIGN_ID" ] || { echo "Kein Developer-ID-Zertifikat im Secret gefunden"; exit 1; }
+          echo "SIGN_ID=$SIGN_ID" >> "$GITHUB_ENV"
+          echo "NOTARY_PROFILE=stehauf" >> "$GITHUB_ENV"
+
+      - run: ./release.sh "${GITHUB_REF_NAME#v}"
+        env:
+          GH_TOKEN: ${{ github.token }}

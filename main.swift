@@ -1,40 +1,29 @@
-// Stehauf: erinnert nach X Minuten am Mac mit einem großen
-// Vollbild-Hinweis ans Aufstehen. Das Overlay ist ein eigenes Fenster und keine
-// Mitteilung, erscheint also auch während eines Fokus.
-//
-// "Am Mac" = Mac wach und entsperrt, Bildschirm an. Eine Pause zählt erst, wenn
-// der Bildschirm gesperrt ist, das Display schläft oder der Mac im Ruhezustand ist.
-// Nur als Sicherheitsnetz (falls du ohne Sperren weggehst) gilt sehr lange
-// Inaktivität (Standard 20 Min.) ebenfalls als Pause.
-//
-// Während Mikrofon oder Kamera benutzt werden (Meeting), wartet die Erinnerung
-// bis danach. Abgefragt wird nur der Status, kein Gerät wird geöffnet – deshalb
-// fragt macOS nach keiner Berechtigung.
-//
-// Ressourcensparend: ein Timer pro Minute mit großzügiger Toleranz, damit
-// macOS Wakeups bündeln kann. Kein Dock-Symbol, keine Menüleiste.
 import AppKit
 import CoreAudio
 import CoreMediaIO
+import ServiceManagement
 
-let env = ProcessInfo.processInfo.environment
-let intervalMin  = Double(env["INTERVAL_MIN"] ?? "") ?? 55    // Minuten am Mac bis zur Erinnerung
-let breakMin     = Double(env["BREAK_MIN"] ?? "") ?? 5        // so lange gesperrt/schlafend = Pause
-let idleResetMin = Double(env["IDLE_RESET_MIN"] ?? "") ?? 20  // so lange keine Eingabe = weg (0 = aus)
-let tick: TimeInterval = 60
+let defaults = UserDefaults.standard
+defaults.register(defaults: ["intervalMin": 55.0, "appearance": "System"])
+var intervalMin: Double { defaults.double(forKey: "intervalMin") }
+var remindInMeetings: Bool { defaults.bool(forKey: "remindInMeetings") }
+var appearance: String { defaults.string(forKey: "appearance")! }
+let testing = CommandLine.arguments.contains("--test")
+// Deutsch, wenn der Mac Deutsch vor Englisch bevorzugt, sonst Englisch
+let german = Bundle.preferredLocalizations(from: ["en", "de"], forPreferences: Locale.preferredLanguages).first == "de"
+func tr(_ de: String, _ en: String) -> String { german ? de : en }
 
 var active: TimeInterval = 0
 var away: TimeInterval = 0
 var last = Date()
 var overlays: [NSWindow] = []
+var statusItem: NSStatusItem?
+var micActive = false
+var cameraActive = false
 
 func screenLocked() -> Bool {
     let dict = CGSessionCopyCurrentDictionary() as? [String: Any]
     return dict?["CGSSessionScreenIsLocked"] as? Bool ?? false
-}
-
-func idleSeconds() -> Double {
-    CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
 }
 
 func micInUse() -> Bool {
@@ -49,8 +38,8 @@ func micInUse() -> Bool {
     addr.mSelector = kAudioProcessPropertyIsRunningInput
     return processes.contains { process in
         var running: UInt32 = 0
-        var size: UInt32 = 4
-        AudioObjectGetPropertyData(process, &addr, 0, nil, &size, &running)
+        var runningSize: UInt32 = 4
+        AudioObjectGetPropertyData(process, &addr, 0, nil, &runningSize, &running)
         return running != 0
     }
 }
@@ -73,108 +62,81 @@ func cameraInUse() -> Bool {
     }
 }
 
-// MARK: - Overlay
+func readDevices() {
+    micActive = micInUse()
+    cameraActive = cameraInUse()
+}
 
 final class OverlayWindow: NSWindow {
-    override var canBecomeKey: Bool { true }
-    override func keyDown(with event: NSEvent) {
-        // Esc schließt
-        if event.keyCode == 53 { dismissOverlay() } else { super.keyDown(with: event) }
+    // Nur das Fenster mit dem Button, sonst landet Esc auf dem anderen Monitor
+    override var canBecomeKey: Bool { self === overlays.first }
+}
+
+func darkMode() -> Bool {
+    switch appearance {
+    case "Hell": false
+    case "Dunkel": true
+    default: NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
 }
 
-final class Dismisser: NSObject {
-    @objc func dismiss() { dismissOverlay() }
-}
-let dismisser = Dismisser()
-
-func label(_ text: String, size: CGFloat, weight: NSFont.Weight, alpha: CGFloat = 1) -> NSTextField {
-    let l = NSTextField(labelWithString: text)
-    l.font = .systemFont(ofSize: size, weight: weight)
-    l.textColor = NSColor.white.withAlphaComponent(alpha)
-    l.alignment = .center
-    l.translatesAutoresizingMaskIntoConstraints = false
-    return l
+func headlineText(size: CGFloat, color: NSColor) -> NSAttributedString {
+    NSAttributedString(string: tr("Steh auf.", "Stand up."), attributes: [
+        .font: NSFont(name: "HelveticaNeue-Medium", size: size) ?? .systemFont(ofSize: size, weight: .medium),
+        .foregroundColor: color,
+        .kern: -size * 0.03,
+    ])
 }
 
-func showOverlay() {
-    guard overlays.isEmpty else { return }
+func showOverlay(silent: Bool = false) {
+    statusItem?.menu?.cancelTracking()
+    NSApp.activate(ignoringOtherApps: true)
+    let sky = NSColor(srgbRed: 0.72, green: 0.85, blue: 0.93, alpha: 1)
+    let ink = NSColor(srgbRed: 0.07, green: 0.16, blue: 0.27, alpha: 1)
+    let (background, foreground) = darkMode() ? (ink, sky) : (sky, ink)
     for (i, screen) in NSScreen.screens.enumerated() {
-        let w = OverlayWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
-        w.level = .screenSaver
-        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        w.isOpaque = false
-        w.backgroundColor = .clear
-        w.isReleasedWhenClosed = false
-        w.alphaValue = 0
+        let window = OverlayWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window.level = .screenSaver
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        window.backgroundColor = background
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
 
-        let bg = NSVisualEffectView()
-        bg.material = .fullScreenUI
-        bg.blendingMode = .behindWindow
-        bg.state = .active
-        bg.appearance = NSAppearance(named: .vibrantDark)
-        w.contentView = bg
-
-        let tint = NSView()
-        tint.wantsLayer = true
-        tint.layer?.backgroundColor = NSColor(calibratedRed: 0.05, green: 0.25, blue: 0.2, alpha: 0.55).cgColor
-        tint.translatesAutoresizingMaskIntoConstraints = false
-        bg.addSubview(tint)
-
-        let stack = NSStackView(views: [
-            label("🚶", size: 140, weight: .regular),
-            label("Zeit für Bewegung", size: 96, weight: .heavy),
-            label("Du bist seit \(Int(max(active / 60, intervalMin))) Minuten am Mac. Steh auf, streck dich, trink was.",
-                  size: 30, weight: .medium, alpha: 0.85),
+        let content = window.contentView!
+        let margin: CGFloat = 64
+        // „Stand up.“ ist breiter als „Steh auf.“ und muss trotzdem mit Rand auf den Bildschirm passen
+        let widthPerPoint = headlineText(size: 100, color: foreground).size().width / 100
+        let size = min(screen.frame.width / 4.3, (screen.frame.width - 2 * margin) / (widthPerPoint - 0.05), screen.frame.height * 0.45)
+        let headline = NSTextField(labelWithAttributedString: headlineText(size: size, color: foreground))
+        headline.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(headline)
+        NSLayoutConstraint.activate([
+            // Ausgleich für den Leerraum links neben dem großen S
+            headline.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: margin - size * 0.05),
+            headline.lastBaselineAnchor.constraint(equalTo: content.bottomAnchor, constant: -margin),
         ])
-        stack.orientation = .vertical
-        stack.spacing = 24
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        bg.addSubview(stack)
 
         if i == 0 {
-            let button = NSButton(title: "Erledigt – weiter geht's", target: dismisser, action: #selector(Dismisser.dismiss))
-            button.bezelStyle = .rounded
+            let button = NSButton(title: tr("Erledigt (Esc)", "Done (Esc)"), target: controller, action: #selector(AppController.dismissOverlay))
+            button.keyEquivalent = "\u{1b}"
+            button.refusesFirstResponder = true
             button.controlSize = .large
-            button.font = .systemFont(ofSize: 22, weight: .semibold)
-            stack.setCustomSpacing(56, after: stack.views.last!)
-            stack.addArrangedSubview(button)
-            stack.addArrangedSubview(label("Esc schließt", size: 15, weight: .regular, alpha: 0.5))
+            button.bezelColor = foreground
+            button.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(button)
+            NSLayoutConstraint.activate([
+                button.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -margin),
+                button.topAnchor.constraint(equalTo: content.topAnchor, constant: margin),
+            ])
         }
 
-        NSLayoutConstraint.activate([
-            tint.leadingAnchor.constraint(equalTo: bg.leadingAnchor),
-            tint.trailingAnchor.constraint(equalTo: bg.trailingAnchor),
-            tint.topAnchor.constraint(equalTo: bg.topAnchor),
-            tint.bottomAnchor.constraint(equalTo: bg.bottomAnchor),
-            stack.centerXAnchor.constraint(equalTo: bg.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: bg.centerYAnchor),
-            stack.widthAnchor.constraint(lessThanOrEqualTo: bg.widthAnchor, constant: -80),
-        ])
-
-        w.setFrame(screen.frame, display: true)
-        w.orderFrontRegardless()
-        if i == 0 { w.makeKey() }
-        NSAnimationContext.runAnimationGroup { $0.duration = 0.4; w.animator().alphaValue = 1 }
-        overlays.append(w)
+        window.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.4; window.animator().alphaValue = 1 }
+        overlays.append(window)
     }
-    NSApp.activate(ignoringOtherApps: true)
-    NSSound(named: "Glass")?.play()
+    overlays.first?.makeKey()
+    if !silent { NSSound(named: "Glass")?.play() }
 }
-
-func dismissOverlay() {
-    let ws = overlays
-    overlays = []
-    active = 0
-    last = Date()
-    NSAnimationContext.runAnimationGroup({ $0.duration = 0.25; ws.forEach { $0.animator().alphaValue = 0 } }) {
-        ws.forEach { $0.close() }
-        if CommandLine.arguments.contains("--test") { exit(0) }
-    }
-    NSApp.hide(nil)
-}
-
-// MARK: - Zeitmessung
 
 func check() {
     let now = Date()
@@ -182,31 +144,297 @@ func check() {
     last = now
     guard overlays.isEmpty else { return }
 
-    // Großer Zeitsprung = Mac war im Ruhezustand
-    if elapsed > breakMin * 60 { active = 0; away = 0; return }
-
+    // Erst 5 Minuten gesperrt, schlafend oder im Ruhezustand sind eine Pause
+    let breakSeconds: TimeInterval = 5 * 60
+    if elapsed > breakSeconds { active = 0; away = 0; return }
     if screenLocked() || CGDisplayIsAsleep(CGMainDisplayID()) != 0 {
         away += elapsed
-        if away >= breakMin * 60 { active = 0 }
+        if away >= breakSeconds { active = 0 }
         return
     }
-    // Stilles Zuhören im Meeting ist keine Pause
-    let inMeeting = micInUse() || cameraInUse()
-    if !inMeeting && idleResetMin > 0 && idleSeconds() >= idleResetMin * 60 { active = 0; return }
-
     away = 0
+
+    let inMeeting = micActive || cameraActive
     active += elapsed
-    if !inMeeting && active >= intervalMin * 60 { showOverlay() }
+    if active >= intervalMin * 60 && (!inMeeting || remindInMeetings) { showOverlay(silent: inMeeting) }
+}
+
+func statusText() -> (title: String, detail: String) {
+    if !remindInMeetings {
+        let devices = [micActive ? tr("Mikrofon", "Microphone") : nil, cameraActive ? tr("Kamera", "camera") : nil].compactMap { $0 }
+        if !devices.isEmpty { return (tr("Pausiert", "Paused"), tr("\(devices.joined(separator: " und ")) aktiv", "\(devices.joined(separator: " and ")) in use")) }
+    }
+    let minutes = max(1, Int((intervalMin - active / 60).rounded(.up)))
+    return (minutesLabel(minutes), tr("bis zur nächsten Erinnerung", "until the next reminder"))
+}
+
+func drawBar(in rect: NSRect, track: NSColor, fill: NSColor) {
+    let shape = NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2)
+    track.setFill()
+    shape.fill()
+    let remaining = min(1, max(0, 1 - active / (intervalMin * 60)))
+    NSGraphicsContext.saveGraphicsState()
+    shape.addClip()
+    fill.setFill()
+    NSBezierPath(rect: NSRect(x: rect.minX, y: rect.minY, width: rect.width * remaining, height: rect.height)).fill()
+    NSGraphicsContext.restoreGraphicsState()
+}
+
+func statusSymbol() -> String {
+    if !remindInMeetings {
+        if cameraActive { return "video.fill" }
+        if micActive { return "mic.fill" }
+    }
+    return "figure.stand"
+}
+
+func statusImage() -> NSImage {
+    let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+    let symbol = NSImage(systemSymbolName: statusSymbol(), accessibilityDescription: nil)!.withSymbolConfiguration(config)!
+    let image = NSImage(size: NSSize(width: 41, height: 18), flipped: false) { _ in
+        // Feste Breite, damit die Leiste beim Symbolwechsel nicht springt
+        let scale = min(1, 16 / symbol.size.width)
+        let size = NSSize(width: symbol.size.width * scale, height: symbol.size.height * scale)
+        symbol.draw(in: NSRect(x: (16 - size.width) / 2, y: (18 - size.height) / 2, width: size.width, height: size.height))
+        drawBar(in: NSRect(x: 19, y: 7, width: 22, height: 4), track: .black.withAlphaComponent(0.25), fill: .black)
+        return true
+    }
+    image.isTemplate = true
+    image.accessibilityDescription = "Stehauf"
+    return image
+}
+
+final class StatusRow: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let card = bounds.insetBy(dx: 10, dy: 3)
+        NSColor.quaternarySystemFill.setFill()
+        NSBezierPath(roundedRect: card, xRadius: 10, yRadius: 10).fill()
+        let (title, detail) = statusText()
+        NSAttributedString(string: title, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 22, weight: .semibold),
+            .foregroundColor: NSColor.labelColor,
+        ]).draw(at: NSPoint(x: card.minX + 14, y: card.minY + 40))
+        NSAttributedString(string: detail, attributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]).draw(at: NSPoint(x: card.minX + 14, y: card.minY + 24))
+        drawBar(in: NSRect(x: card.minX + 14, y: card.minY + 12, width: card.width - 28, height: 6),
+                track: .quaternaryLabelColor, fill: statusSymbol() == "figure.stand" ? .controlAccentColor : .secondaryLabelColor)
+    }
+}
+
+func refreshStatus() {
+    statusItem?.button?.image = statusImage()
+    statusRow.needsDisplay = true
+}
+
+func minutesLabel(_ value: Int) -> String {
+    tr("\(value) Min", "\(value) min")
+}
+
+// Gespeichert bleibt der deutsche Name, damit bestehende Einstellungen gelten
+func appearanceName(_ mode: String) -> String {
+    switch mode {
+    case "Hell": tr("Hell", "Light")
+    case "Dunkel": tr("Dunkel", "Dark")
+    default: "System"
+    }
+}
+
+func isInstalled() -> Bool {
+    let folder = Bundle.main.bundleURL.deletingLastPathComponent().path
+    // Auch Unterordner wie /Applications/Utilities zählen
+    return (folder + "/").hasPrefix("/Applications/") || (folder + "/").hasPrefix(NSHomeDirectory() + "/Applications/")
+}
+
+func showAlert(_ title: String, _ text: String, buttons: [String] = ["OK"]) -> NSApplication.ModalResponse {
+    NSApp.activate(ignoringOtherApps: true)
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = text
+    buttons.forEach { alert.addButton(withTitle: $0) }
+    return alert.runModal()
+}
+
+func install() throws {
+    let manager = FileManager.default
+    let folder = manager.isWritableFile(atPath: "/Applications")
+        ? URL(fileURLWithPath: "/Applications")
+        : manager.homeDirectoryForCurrentUser.appendingPathComponent("Applications")
+    try manager.createDirectory(at: folder, withIntermediateDirectories: true)
+    // Fester Name, sonst landet ein erneuter Download („Stehauf 2.app“) als zweite Kopie dort
+    let target = folder.appendingPathComponent("Stehauf.app")
+
+    // Beim Update läuft die alte Version noch
+    NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier!)
+        .filter { $0 != .current }
+        .forEach { $0.terminate() }
+    if manager.fileExists(atPath: target.path) { try manager.removeItem(at: target) }
+    try manager.copyItem(at: Bundle.main.bundleURL, to: target)
+
+    // Die Kopie erbt die Quarantäne des Downloads, den du gerade bestätigt hast
+    let xattr = try Process.run(URL(fileURLWithPath: "/usr/bin/xattr"), arguments: ["-dr", "com.apple.quarantine", target.path])
+    xattr.waitUntilExit()
+
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.createsNewApplicationInstance = true
+    NSWorkspace.shared.openApplication(at: target, configuration: configuration) { _, _ in
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
+}
+
+func offerInstall() {
+    let answer = showAlert(tr("Stehauf installieren?", "Install Stehauf?"),
+                           tr("Stehauf kommt in den Programme-Ordner und startet ab jetzt automatisch, wenn du dich anmeldest.",
+                              "Stehauf goes into your Applications folder and from now on opens automatically when you log in."),
+                           buttons: [tr("Installieren", "Install"), tr("Abbrechen", "Cancel")])
+    guard answer == .alertFirstButtonReturn else { NSApp.terminate(nil); return }
+    do {
+        try install()
+    } catch {
+        _ = showAlert(tr("Installation fehlgeschlagen", "Installation failed"), error.localizedDescription)
+        NSApp.terminate(nil)
+    }
+}
+
+func welcomeOnFirstLaunch() {
+    guard !defaults.bool(forKey: "welcomed") else { return }
+    defaults.set(true, forKey: "welcomed")
+    try? SMAppService.mainApp.register()
+    _ = showAlert(tr("Stehauf läuft", "Stehauf is running"),
+                  tr("Du findest es oben rechts in der Menüleiste, als kleine Figur mit Balken. Nach \(Int(intervalMin)) Minuten am Mac erinnert es dich ans Aufstehen. Mit Rechtsklick kommst du zu den Einstellungen.",
+                     "You'll find it at the top right of the menu bar, as a small figure with a bar. After \(Int(intervalMin)) minutes at your Mac, it reminds you to stand up. Right-click it for settings."))
+}
+
+final class AppController: NSObject, NSApplicationDelegate {
+    // Ein Menüleisten-Programm zeigt beim Doppelklick sonst gar nichts
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if overlays.isEmpty { statusItem?.button?.performClick(nil) }
+        return false
+    }
+
+    // Linksklick zeigt den Status, Rechtsklick die Einstellungen
+    @objc func statusItemClicked() {
+        let event = NSApp.currentEvent
+        let rightClick = event?.type == .rightMouseDown || event?.modifierFlags.contains(.control) == true
+        readDevices()
+        refreshStatus()
+        statusItem?.menu = rightClick ? settingsMenu() : statusMenu()
+        statusItem?.button?.performClick(nil)
+        statusItem?.menu = nil
+    }
+
+    private func statusMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "", action: nil, keyEquivalent: "").view = statusRow
+        return menu
+    }
+
+    private func settingsMenu() -> NSMenu {
+        let menu = NSMenu()
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        menu.addItem(withTitle: "Stehauf \(version)", action: nil, keyEquivalent: "")
+        menu.addItem(.separator())
+        addItem(to: menu, tr("Beim Anmelden starten", "Open at Login"), #selector(toggleLogin)).state = SMAppService.mainApp.status == .enabled ? .on : .off
+        addItem(to: menu, tr("Auch in Meetings erinnern", "Remind During Meetings"), #selector(toggleMeetings)).state = remindInMeetings ? .on : .off
+        menu.addItem(.separator())
+        addIntervalChoices(to: menu)
+        addAppearanceChoices(to: menu)
+        menu.addItem(.separator())
+        addItem(to: menu, tr("Stehauf beenden", "Quit Stehauf"), #selector(quit)).keyEquivalent = "q"
+        return menu
+    }
+
+    @discardableResult
+    private func addItem(to menu: NSMenu, _ title: String, _ action: Selector) -> NSMenuItem {
+        let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
+    private func addSubmenu(to menu: NSMenu, _ title: String, current: String, _ submenu: NSMenu) {
+        let item = menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+        item.subtitle = current
+        item.submenu = submenu
+    }
+
+    private func addIntervalChoices(to menu: NSMenu) {
+        let submenu = NSMenu()
+        for value in [30, 45, 55, 60] {
+            let item = addItem(to: submenu, minutesLabel(value), #selector(chooseInterval))
+            item.tag = value
+            item.state = Double(value) == intervalMin ? .on : .off
+        }
+        addSubmenu(to: menu, tr("Erinnern nach", "Remind After"), current: minutesLabel(Int(intervalMin)), submenu)
+    }
+
+    private func addAppearanceChoices(to menu: NSMenu) {
+        let submenu = NSMenu()
+        for mode in ["System", "Hell", "Dunkel"] {
+            let item = addItem(to: submenu, appearanceName(mode), #selector(chooseAppearance))
+            item.representedObject = mode
+            item.state = mode == appearance ? .on : .off
+        }
+        addSubmenu(to: menu, tr("Darstellung", "Appearance"), current: appearanceName(appearance), submenu)
+    }
+
+    @objc func dismissOverlay() {
+        overlays.forEach { $0.close() }
+        overlays = []
+        active = 0
+        last = Date()
+        if testing { exit(0) }
+        refreshStatus()
+        NSApp.hide(nil)
+    }
+
+    @objc private func toggleMeetings() {
+        defaults.set(!remindInMeetings, forKey: "remindInMeetings")
+        refreshStatus()
+    }
+
+    @objc private func toggleLogin() {
+        let service = SMAppService.mainApp
+        if service.status == .enabled { try? service.unregister() } else { try? service.register() }
+        // Wurde der Autostart in den Systemeinstellungen abgeschaltet, lässt er sich nur dort wieder einschalten
+        if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+    }
+
+    @objc private func chooseInterval(_ item: NSMenuItem) {
+        defaults.set(Double(item.tag), forKey: "intervalMin")
+        refreshStatus()
+    }
+
+    @objc private func chooseAppearance(_ item: NSMenuItem) {
+        defaults.set(item.representedObject, forKey: "appearance")
+    }
+
+    @objc private func quit() {
+        NSApp.terminate(nil)
+    }
 }
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+let controller = AppController()
+app.delegate = controller
+let statusRow = StatusRow(frame: NSRect(x: 0, y: 0, width: 260, height: 84))
 
-if CommandLine.arguments.contains("--test") {
+if testing {
     DispatchQueue.main.async { showOverlay() }
+} else if !isInstalled() {
+    DispatchQueue.main.async { offerInstall() }
 } else {
-    let timer = Timer(timeInterval: tick, repeats: true) { _ in check() }
+    statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    statusItem?.button?.target = controller
+    statusItem?.button?.action = #selector(AppController.statusItemClicked)
+    statusItem?.button?.sendAction(on: [.leftMouseDown, .rightMouseDown])
+    readDevices()
+    refreshStatus()
+    // .common, damit der Timer auch bei geöffnetem Menü weiterläuft
+    let timer = Timer(timeInterval: 60, repeats: true) { _ in readDevices(); check(); refreshStatus() }
     timer.tolerance = 15
     RunLoop.main.add(timer, forMode: .common)
+    DispatchQueue.main.async { welcomeOnFirstLaunch() }
 }
 app.run()
